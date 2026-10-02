@@ -1,6 +1,12 @@
 """Summarize WER/SIM/UTMOS over seeds: python repro/summarize.py results/<MODEL>_<STEP> [...]"""
-import glob, os, re, sys
+
+import glob
+import os
+import re
+import sys
+
 import numpy as np
+
 
 # paper / README reference numbers (F5-TTS v1 Base from SWivid/F5-TTS, v0 Base from arXiv 2410.06885)
 for root in sys.argv[1:]:
@@ -10,7 +16,7 @@ for root in sys.argv[1:]:
         for m in ("wer", "sim", "utmos"):
             vals = []
             for f in sorted(glob.glob(f"{root}/{task}/seed*/_{m}_results.jsonl")):
-                last = [l for l in open(f).read().strip().splitlines() if l.startswith(m.upper())]
+                last = [ln for ln in open(f).read().strip().splitlines() if ln.startswith(m.upper())]
                 if last:
                     vals.append(float(re.findall(r"[-\d.]+", last[-1])[-1]))
             if vals:

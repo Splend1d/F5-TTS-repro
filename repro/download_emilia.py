@@ -1,8 +1,13 @@
 """Download Emilia ZH+EN (pinned rev fc71e07, the folder format prepare_emilia.py expects) and extract.
 Idempotent: a marker per shard in raw/.done; safe to kill / requeue at any point."""
-import os, subprocess, sys
+
+import os
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from huggingface_hub import HfApi, hf_hub_download
+
 
 REPO, REV = "amphion/Emilia-Dataset", "fc71e07e8572f5f3be1dbd02ed3172a4d298f152"
 ROOT = "/data/group_data/UTD-NAS/chanjanh/speechgen/data_raw/Emilia"
@@ -49,7 +54,7 @@ if not os.path.exists(f"{DONE}/openemilia_all"):
 
 nworkers = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 todo = sorted(shards.items(), key=lambda kv: kv[0])
-print(f"{len(todo)} shards, {sum(os.path.exists(f'{DONE}/{n}') for n,_ in todo)} already done", flush=True)
+print(f"{len(todo)} shards, {sum(os.path.exists(f'{DONE}/{n}') for n, _ in todo)} already done", flush=True)
 with ThreadPoolExecutor(nworkers) as ex:
     futs = [ex.submit(do_shard, n, p) for n, p in todo]
     for i, fu in enumerate(as_completed(futs)):
