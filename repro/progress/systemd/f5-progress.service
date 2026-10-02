@@ -1,0 +1,6 @@
+[Unit]
+Description=Export F5-TTS training progress to GitHub Pages
+
+[Service]
+Type=oneshot
+ExecStart=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS/repro/progress/update.sh

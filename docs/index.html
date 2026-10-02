@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F5-TTS Training Progress</title>
+<meta name="description" content="Live progress of the F5TTS_v1_Base reproduction on Emilia ZH+EN">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #e3e2dc;
+    --accent: #2f6fdb; --accent-soft: rgba(47,111,219,.18); --lr: #c2620a;
+    --ok: #1f8a4c; --warn: #b7791f; --idle: #8a8a85;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141413; --surface: #1d1d1b; --text: #ecebe6; --muted: #9c9b95; --border: #2e2e2b;
+      --accent: #6b9cf0; --accent-soft: rgba(107,156,240,.22); --lr: #f0a050;
+      --ok: #4cc27f; --warn: #e0a84a; --idle: #85857f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141413; --surface: #1d1d1b; --text: #ecebe6; --muted: #9c9b95; --border: #2e2e2b;
+    --accent: #6b9cf0; --accent-soft: rgba(107,156,240,.22); --lr: #f0a050;
+    --ok: #4cc27f; --warn: #e0a84a; --idle: #85857f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 48px; }
+  header h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -.01em; }
+  header p { margin: 0; color: var(--muted); }
+  .links { margin-top: 10px; display: flex; gap: 14px; flex-wrap: wrap; font-size: 14px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 24px 0 12px; }
+  .tile .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .tile .value { font-size: 24px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; vertical-align: 2px; }
+  .bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-top: 10px; }
+  .bar > div { height: 100%; background: var(--accent); }
+  .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  .chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .chart-head h2 { font-size: 15px; margin: 0; }
+  .chart-head label { font-size: 13px; color: var(--muted); }
+  select { font: inherit; font-size: 13px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; }
+  .chart-box { position: relative; height: 300px; }
+  h2.section { font-size: 15px; margin: 28px 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .table-wrap { overflow-x: auto; }
+  .muted { color: var(--muted); }
+  dl.cfg { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0; font-size: 14px; }
+  dl.cfg dt { color: var(--muted); }
+  dl.cfg dd { margin: 0; }
+  footer { margin-top: 28px; font-size: 13px; color: var(--muted); }
+  #error { display: none; color: var(--warn); margin-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>F5-TTS v1 Base reproduction</h1>
+    <p>Training from scratch on Emilia ZH+EN (~95k h), target 1.25M updates</p>
+    <div class="links">
+      <a href="https://github.com/Splend1d/F5-TTS-repro/tree/main/repro">Code &amp; setup</a>
+      <a id="wandb-link" href="https://wandb.ai/splend1dchan/CFM-TTS/runs/f5tts-main-20260930">W&amp;B run</a>
+      <a href="https://huggingface.co/SpeechGenCourse/F5TTS_v1_Base_Emilia_ZH_EN_repro">Checkpoint (HF, private)</a>
+      <a href="metrics.json">Raw data (JSON)</a>
+    </div>
+  </header>
+
+  <div id="error">Couldn't load metrics.json.</div>
+
+  <section class="tiles">
+    <div class="card tile">
+      <div class="label">Update</div>
+      <div class="value" id="t-update">–</div>
+      <div class="sub" id="t-update-sub"></div>
+      <div class="bar"><div id="t-bar" style="width:0"></div></div>
+    </div>
+    <div class="card tile">
+      <div class="label">Job</div>
+      <div class="value" id="t-job">–</div>
+      <div class="sub" id="t-job-sub"></div>
+    </div>
+    <div class="card tile">
+      <div class="label">Speed</div>
+      <div class="value" id="t-speed">–</div>
+      <div class="sub" id="t-speed-sub"></div>
+    </div>
+    <div class="card tile">
+      <div class="label">Latest checkpoint</div>
+      <div class="value" id="t-ckpt">–</div>
+      <div class="sub" id="t-ckpt-sub">model_last.pt, resumable</div>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="chart-head">
+        <h2>Training loss</h2>
+        <label>Smoothing
+          <select id="smooth">
+            <option value="0">none</option>
+            <option value="0.9">0.9</option>
+            <option value="0.97" selected>0.97</option>
+            <option value="0.99">0.99</option>
+          </select>
+        </label>
+      </div>
+      <div class="chart-box"><canvas id="loss"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="chart-head"><h2>Learning rate</h2></div>
+      <div class="chart-box"><canvas id="lr"></canvas></div>
+    </div>
+  </div>
+
+  <h2 class="section">Evaluations</h2>
+  <div class="card">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Update</th><th>Test set</th><th>WER ↓</th><th>SIM ↑</th><th>UTMOS ↑</th><th>Seeds</th></tr></thead>
+        <tbody id="evals"><tr><td colspan="6" class="muted">No evaluations yet. The first full eval is planned at 50k updates.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <h2 class="section">Setup</h2>
+  <div class="card">
+    <dl class="cfg">
+      <dt>Model</dt><dd>DiT, dim 1024, depth 22, 16 heads, ff_mult 2, text_dim 512, conv_layers 4 (~336M params)</dd>
+      <dt>Data</dt><dd>Emilia ZH+EN @ rev fc71e07: 37.8M utterances, ~95,282 h, pinyin tokenizer, official vocab</dd>
+      <dt>Batch</dt><dd>307,200 frames/update (19,200/GPU × NGPU × accum = 16)</dd>
+      <dt>Optimizer</dt><dd>AdamW, LR 7.5e-5, 20k warmup, grad clip 1.0, bf16, 11 epochs</dd>
+      <dt>Audio</dt><dd>24 kHz, 100-bin vocos mel, hop 256</dd>
+    </dl>
+  </div>
+
+  <footer id="footer">Updated automatically every 6 hours from the training cluster.</footer>
+</main>
+
+<script>
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmt = n => n.toLocaleString("en-US");
+const ago = s => s < 3600 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${(s / 3600).toFixed(1)} h ago` : `${(s / 86400).toFixed(1)} days ago`;
+
+function ema(xs, a) {
+  if (!a) return xs;
+  let m = xs[0], out = [];
+  for (const x of xs) { m = a * m + (1 - a) * x; out.push(m); }
+  return out;
+}
+
+function axisOpts() {
+  const grid = css("--border"), tick = css("--muted");
+  return {
+    x: { type: "linear", grid: { color: grid }, ticks: { color: tick, callback: v => v >= 1000 ? `${v / 1000}k` : v }, title: { display: true, text: "update", color: tick } },
+    y: { grid: { color: grid }, ticks: { color: tick } },
+  };
+}
+
+let lossChart, lrChart, data;
+
+function render() {
+  const h = data.history, a = parseFloat(document.getElementById("smooth").value);
+  const raw = h.step.map((s, i) => ({ x: s, y: h.loss[i] }));
+  const sm = ema(h.loss, a).map((y, i) => ({ x: h.step[i], y }));
+  const base = { responsive: true, maintainAspectRatio: false, animation: false, parsing: false, normalized: true,
+    interaction: { mode: "nearest", axis: "x", intersect: false }, plugins: { legend: { display: false } } };
+
+  lossChart?.destroy();
+  lossChart = new Chart(document.getElementById("loss"), {
+    type: "line",
+    data: { datasets: [
+      { label: "loss (raw)", data: raw, borderColor: css("--accent-soft"), borderWidth: 1, pointRadius: 0 },
+      { label: a ? `loss (EMA ${a})` : "loss", data: a ? sm : [], borderColor: css("--accent"), borderWidth: 2, pointRadius: 0 },
+    ] },
+    options: { ...base, scales: { ...axisOpts(), y: { ...axisOpts().y, suggestedMax: 1.6 } },
+      plugins: { ...base.plugins, tooltip: { callbacks: { title: it => `update ${fmt(it[0].parsed.x)}`, label: it => `${it.dataset.label}: ${it.parsed.y.toFixed(4)}` } } } },
+  });
+
+  lrChart?.destroy();
+  lrChart = new Chart(document.getElementById("lr"), {
+    type: "line",
+    data: { datasets: [{ label: "lr", data: h.step.map((s, i) => ({ x: s, y: h.lr[i] })), borderColor: css("--lr"), borderWidth: 2, pointRadius: 0 }] },
+    options: { ...base, scales: { ...axisOpts(), y: { ...axisOpts().y, ticks: { color: css("--muted"), callback: v => v.toExponential(1) } } },
+      plugins: { ...base.plugins, tooltip: { callbacks: { title: it => `update ${fmt(it[0].parsed.x)}`, label: it => `lr: ${it.parsed.y.toExponential(2)}` } } } },
+  });
+}
+
+function fill() {
+  const p = data.progress, j = data.job;
+  const pct = 100 * p.update / p.total_updates;
+  document.getElementById("t-update").textContent = fmt(p.update);
+  document.getElementById("t-update-sub").textContent = `of ${fmt(p.total_updates)} (${pct.toFixed(2)}%), epoch ${p.epoch}/${p.epochs}`;
+  document.getElementById("t-bar").style.width = `${Math.max(pct, 0.4)}%`;
+
+  const color = { RUNNING: "--ok", PENDING: "--warn" }[j.state] || "--idle";
+  const label = { RUNNING: "Running", PENDING: "Queued", COMPLETED: "Completed", "NOT QUEUED": "Stopped" }[j.state] || j.state;
+  const jv = document.getElementById("t-job");
+  jv.innerHTML = `<span class="dot" style="background:var(${color})"></span>`;
+  jv.append(label);
+  const gpus = j.gpus ? j.gpus.replace(/^(.*):(\d+)$/, "$2× $1").replace("_", " ") : "";
+  document.getElementById("t-job-sub").textContent =
+    j.state === "RUNNING" ? `${gpus} on ${j.node}, up ${j.elapsed}` :
+    j.state === "PENDING" ? `waiting for ${gpus || "GPUs"} (${j.reason})` : "";
+
+  if (p.sec_per_update) {
+    document.getElementById("t-speed").textContent = `${p.sec_per_update.toFixed(2)} s/update`;
+    document.getElementById("t-speed-sub").textContent = `ETA ~${p.eta_days} days at this speed`;
+  } else {
+    document.getElementById("t-speed").textContent = "–";
+    document.getElementById("t-speed-sub").textContent = p.seconds_since_last_log
+      ? `no live data; last log ${ago(p.seconds_since_last_log)}` : "no live data";
+  }
+
+  document.getElementById("t-ckpt").textContent = p.checkpoint_update != null ? fmt(p.checkpoint_update) : "–";
+
+  if (data.evals.length) {
+    const tb = document.getElementById("evals");
+    tb.innerHTML = "";
+    for (const e of data.evals) {
+      const tr = document.createElement("tr");
+      const cell = (v, d) => v == null ? "–" : v.toFixed(d);
+      [fmt(e.step), e.task, cell(e.wer != null ? e.wer * 100 : null, 2) + (e.wer != null ? "%" : ""), cell(e.sim, 3), cell(e.utmos, 2), e.wer_n || e.sim_n || ""]
+        .forEach(v => { const td = document.createElement("td"); td.textContent = v; tr.append(td); });
+      tb.append(tr);
+    }
+  }
+
+  document.getElementById("wandb-link").href = data.run.url;
+  const gen = new Date(data.generated_at * 1000);
+  document.getElementById("footer").textContent =
+    `Data exported ${gen.toLocaleString()} (${ago(Date.now() / 1000 - data.generated_at)}). Updated automatically every 6 hours from the training cluster.`;
+}
+
+fetch("metrics.json", { cache: "no-store" })
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+  .then(d => { data = d; fill(); render(); })
+  .catch(() => { document.getElementById("error").style.display = "block"; });
+
+document.getElementById("smooth").addEventListener("change", render);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => data && render());
+</script>
+</body>
+</html>

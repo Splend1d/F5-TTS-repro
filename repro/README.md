@@ -4,6 +4,7 @@ This folder reproduces `F5TTS_v1_Base` (DiT, 1.25M updates) from scratch on Emil
 [SWivid/F5-TTS](https://github.com/SWivid/F5-TTS) at `2832525` (v1.1.22). The training scripts are set up for
 a preemptible SLURM cluster (CMU babel).
 
+- **Live dashboard:** https://splend1d.github.io/F5-TTS-repro/ (refreshed every 6 h)
 - **Checkpoint (private):** https://huggingface.co/SpeechGenCourse/F5TTS_v1_Base_Emilia_ZH_EN_repro
 - **W&B:** project `splend1dchan/CFM-TTS`, run id `f5tts-main-20260930`
   (https://wandb.ai/splend1dchan/CFM-TTS/runs/f5tts-main-20260930). This run is created on the first resume
@@ -16,7 +17,7 @@ a preemptible SLURM cluster (CMU babel).
 | Latest checkpoint | `model_last.pt` @ **update 5,500** / 1,250,000 (0.44%) |
 | Epoch | 1 / 11 (115,551 updates per epoch) |
 | Train loss | ~0.94–1.05 at update ~5.6k |
-| Throughput | ~4.6 s/update at 16 × 19,200 frames (8×A100 or 4 GPUs × accum 4) |
+| Throughput | ~4.76 s/update on 4× RTX A6000 (accum 4); 5,500 updates took 7 h 16 min |
 | LR | still in warmup (20k updates, peak 7.5e-5) |
 | Eval | none yet; a sanity check is planned, and the first real comparison at 50k |
 
@@ -120,6 +121,12 @@ python repro/summarize.py results/F5TTS_v1_Base_50000
 ```
 
 `repro/ckpts_eval/` (not committed) holds the WavLM-large SIM model (`wavlm_large_finetune.pth`).
+
+## Progress page
+
+`docs/` is served by GitHub Pages. `repro/progress/update.sh` runs `export.py`, which writes `docs/metrics.json`
+(W&B history, job state, checkpoint step, evals), and pushes when it changes. To refresh it every 6 h, run once on
+a **login node**: `bash repro/progress/install_timer.sh`.
 
 ## License
 
