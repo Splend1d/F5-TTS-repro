@@ -3,6 +3,8 @@ from __future__ import annotations
 import gc
 import math
 import os
+import signal
+import sys
 
 import torch
 import torchaudio
@@ -21,6 +23,11 @@ from f5_tts.model.utils import default, exists
 
 
 # trainer
+
+
+def _ignore_sigterm(_worker_id):
+    # slurm signals every process in the job; only the main rank process should react (save + exit)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 
 class Trainer:
@@ -59,6 +66,12 @@ class Trainer:
         if logger == "wandb" and not wandb.api.api_key:
             logger = None
         self.log_samples = log_samples
+
+        # opt-in: on SIGTERM (e.g. slurm preemption) save model_last and exit instead of dying mid-run
+        self.save_on_sigterm = os.environ.get("F5_SAVE_ON_SIGTERM", "0") == "1"
+        self._stop_requested = False
+        if self.save_on_sigterm:
+            signal.signal(signal.SIGTERM, lambda signum, frame: setattr(self, "_stop_requested", True))
 
         self.accelerator = Accelerator(
             log_with=logger if logger == "wandb" else None,
@@ -160,7 +173,9 @@ class Trainer:
             if not os.path.exists(self.checkpoint_path):
                 os.makedirs(self.checkpoint_path)
             if last:
-                self.accelerator.save(checkpoint, f"{self.checkpoint_path}/model_last.pt")
+                # write-then-rename so a preemption mid-save cannot corrupt model_last.pt
+                self.accelerator.save(checkpoint, f"{self.checkpoint_path}/model_last.pt.tmp")
+                os.replace(f"{self.checkpoint_path}/model_last.pt.tmp", f"{self.checkpoint_path}/model_last.pt")
                 print(f"Saved last checkpoint at update {update}")
             else:
                 if self.keep_last_n_checkpoints == 0:
@@ -286,6 +301,7 @@ class Trainer:
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,
+                worker_init_fn=_ignore_sigterm if self.save_on_sigterm else None,
                 batch_size=self.batch_size_per_gpu,
                 shuffle=True,
                 generator=generator,
@@ -306,6 +322,7 @@ class Trainer:
                 num_workers=num_workers,
                 pin_memory=True,
                 persistent_workers=True,
+                worker_init_fn=_ignore_sigterm if self.save_on_sigterm else None,
                 batch_sampler=batch_sampler,
             )
         else:
@@ -398,6 +415,16 @@ class Trainer:
                 if self.logger == "tensorboard" and self.accelerator.is_main_process:
                     self.writer.add_scalar("loss", loss.item(), global_update)
                     self.writer.add_scalar("lr", self.scheduler.get_last_lr()[0], global_update)
+
+                if self.save_on_sigterm:
+                    # all ranks agree on stopping at the same micro-step; resume redoes any partial accumulation
+                    stop = torch.tensor([float(self._stop_requested)], device=self.accelerator.device)
+                    if self.accelerator.reduce(stop, reduction="sum").item() > 0:
+                        if self.is_main:
+                            print(f"SIGTERM received, saving at update {global_update} and exiting")
+                        self.save_checkpoint(global_update, last=True)
+                        self.accelerator.wait_for_everyone()
+                        sys.exit(143)
 
                 if global_update % self.last_per_updates == 0 and self.accelerator.sync_gradients:
                     self.save_checkpoint(global_update, last=True)

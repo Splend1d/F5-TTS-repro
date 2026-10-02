@@ -1,0 +1,6 @@
+logs/
+state/*
+!state/main.env
+stale/
+ckpts_eval/
+__pycache__/
