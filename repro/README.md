@@ -21,6 +21,11 @@ a preemptible SLURM cluster (CMU babel).
 | LR | still in warmup (20k updates, peak 7.5e-5) |
 | Eval | none yet; a sanity check is planned, and the first real comparison at 50k |
 
+**Data switch (2026-10-03):** from update 5,500 the run continues on **Emilia EN only** (`data/Emilia_EN_pinyin`,
+18.1M utterances, 46,643 h, cut from the ZH+EN set by `repro/make_en_subset.py`). Checkpoints go to
+`ckpts/F5TTS_v1_Base_vocos_pinyin_Emilia_EN`. `optim.total_updates=1271061` keeps the LR schedule and the end of
+training identical to the ZH+EN run (11 × 115,551 updates). These overrides live in `repro/state/main.env`.
+
 The checkpoint is the full resumable state: model, EMA, optimizer, scheduler and `update`.
 
 ## Config
@@ -43,6 +48,14 @@ The base config is `src/f5_tts/configs/F5TTS_v1_Base.yaml`. Overrides are passed
 - `src/f5_tts/model/trainer.py`: with `F5_SAVE_ON_SIGTERM=1`, all ranks agree to stop at the next micro-step on
   SIGTERM, then save `model_last.pt` and exit 143. Dataloader workers ignore SIGTERM. `model_last.pt` is written
   to a temp file and renamed, so a preemption mid-save can't corrupt it.
+- `src/f5_tts/model/trainer.py`, resume state:
+  - **LR schedule:** the same warmup + linear decay curve, but computed from the update count and stepped once per
+    update. Upstream lets accelerate step it once per GPU per update, so a saved scheduler was only valid on the
+    same GPU count; moving between 4 and 8 GPUs would have changed the schedule. On resume it is rebuilt from `update`.
+  - **RNG:** each rank saves its Python/NumPy/torch/CUDA RNG state (taken at the last update boundary) to
+    `rng_last/rank<r>.pt` next to `model_last.pt`, and restores it on resume. If the GPU count changed, or the
+    checkpoint predates this (like the 5,500 one), ranks are seeded deterministically from (seed, update, rank).
+  - **Sessions:** with `F5_SAVES_PER_SESSION=N`, the process exits with code 3 after its N-th periodic save.
 - `src/f5_tts/train/train.py`: the env vars `F5_LOGGER`, `WANDB_PROJECT`, `WANDB_NAME` and `WANDB_RUN_ID`
   override the logger and W&B identity, so a job that is already queued can switch loggers and every resubmit
   continues the same W&B run.
@@ -86,11 +99,24 @@ hf download SpeechGenCourse/F5TTS_v1_Base_Emilia_ZH_EN_repro model_last.pt \
 # W&B: repro/state/main.env pins the run id. Every (re)submit appends to the same run.
 wandb login
 
-# preempt partition, 8- and 4-GPU variants queued; the first to start wins and cancels the other
+# current setup: preempt, 4 x L40S requested as 4 tasks x 1 GPU (may span nodes), 45 min sessions
+SPREAD=1 GTYPE=L40S VARIANTS=4 bash repro/submit_train.sh
+# all GPUs on one node instead (8- and 4-GPU variants queued; the first to start wins)
 bash repro/submit_train.sh
-# or the general partition on 8xA100-80GB (2-day limit, self-resubmits)
-PART=general QOS=normal TLIMIT=2-00:00:00 GTYPE=A100_80GB VARIANTS=8 TAKEOVER=1 bash repro/submit_train.sh
 ```
+
+`SPREAD=1` asks SLURM for `--ntasks=N --gpus-per-task=1` instead of N GPUs on one node, which fits into scattered
+free GPUs. Ranks are started with `srun` and use DDP over InfiniBand (~1.35 GB of gradients per update). NGPU,
+accumulation, data order and resume are the same as on one node. Keep `GTYPE` pinned so GPU types aren't mixed.
+
+Training runs as a chain of short **sessions**. Each job has a 45 min limit (`TLIMIT`; a 500-update session takes ~27 min on 4× L40S). It resumes, trains to the
+next `model_last.pt` save (every `LAST=500` updates, ~40 min on 4× A6000), saves once, exits, and queues the next
+session. Short jobs start sooner through backfill. If a session hits its limit or is preempted first, it saves on
+SIGTERM instead, so there is still at most one save per session. `SAVES_PER_SESSION=0` gives one long job instead.
+
+What a resume restores: model, EMA, optimizer, LR position, update count, data order and position (seeded
+sampler plus batch skip, consistent across 4↔8 GPUs), per-rank RNG (same GPU count) and the W&B run. Any partial
+gradient accumulation at a SIGTERM save is redone.
 
 Without SLURM, on one 8-GPU node:
 

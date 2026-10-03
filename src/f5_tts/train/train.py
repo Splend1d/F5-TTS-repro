@@ -51,6 +51,7 @@ def main(model_cfg):
         epochs=model_cfg.optim.epochs,
         learning_rate=model_cfg.optim.learning_rate,
         num_warmup_updates=model_cfg.optim.num_warmup_updates,
+        total_updates=model_cfg.optim.get("total_updates", None),
         save_per_updates=model_cfg.ckpts.save_per_updates,
         keep_last_n_checkpoints=model_cfg.ckpts.keep_last_n_checkpoints,
         checkpoint_path=str(files("f5_tts").joinpath(f"../../{model_cfg.ckpts.save_dir}")),

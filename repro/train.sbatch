@@ -2,6 +2,9 @@
 # F5TTS_v1_Base on Emilia ZH+EN, preemptible + self-resubmitting.
 # Submit via: bash repro/submit_train.sh   (queues an 8-GPU and a 4-GPU variant; first to start wins)
 #
+# Sessions: each job is a short (default 45 min) session that resumes, trains to the next model_last save
+# (every LAST=500 updates), saves once, exits, and queues the next session. SAVES_PER_SESSION=0 disables this.
+#
 # Global batch is fixed at the official 8 x 38400 = 307200 frames/update:
 #   19200 frames/GPU x NGPU x ACCUM, with NGPU x ACCUM = 16.
 # The trainer's resume (skip update*accum batches/process) lands on the same data position
@@ -9,7 +12,7 @@
 #SBATCH --job-name=f5-train
 #SBATCH --partition=preempt
 #SBATCH --qos=preempt_qos
-#SBATCH --time=31-00:00:00
+#SBATCH --time=00:45:00
 #SBATCH --no-requeue
 #SBATCH --signal=B:TERM@110
 #SBATCH --output=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS/repro/logs/%x-%j.out
@@ -45,11 +48,22 @@ for j in $(squeue -h -u $USER -n $SLURM_JOB_NAME -t PD -o %i); do
 done
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-NGPU=$(nvidia-smi -L | wc -l)
+# SPREAD=1: the job is N tasks x 1 GPU that may sit on different nodes (submit_train.sh --ntasks/--gpus-per-task);
+# ranks are started with srun and talk over the network (InfiniBand). Otherwise: all GPUs on this node.
+SPREAD=${SPREAD:-0}
+if [ "$SPREAD" = 1 ]; then
+  NGPU=$SLURM_NTASKS
+  NW=$(( SLURM_CPUS_PER_TASK - 1 ))
+  log "nodes: $SLURM_JOB_NODELIST"
+  log "GPUs: $(srun --ntasks=$NGPU bash -c 'echo $(hostname -s):$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)' 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
+else
+  NGPU=$(nvidia-smi -L | wc -l)
+  NW=$(( SLURM_CPUS_PER_TASK / NGPU - 1 ))
+  log "GPUs: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
+fi
+[ $NW -gt 8 ] && NW=8
 ACCUM=$((16 / NGPU))
 [ $((NGPU * ACCUM)) -eq 16 ] || { log "unsupported NGPU=$NGPU"; exit 1; }
-NW=$(( SLURM_CPUS_PER_TASK / NGPU - 1 )); [ $NW -gt 8 ] && NW=8
-log "GPUs: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | sort | uniq -c | tr '\n' ' ')"
 log "NGPU=$NGPU ACCUM=$ACCUM workers/gpu=$NW CFG=$CFG TAG=$TAG EXTRA=$EXTRA"
 
 resubmit() {  # $1 = reason; optional $2 = node to exclude
@@ -77,35 +91,66 @@ on_term() {
 }
 trap on_term TERM
 
-before=$(grep -h "Saved last checkpoint at update" $F5/repro/logs/f5-train-$TAG-*.out 2>/dev/null | awk '{print $NF}' | sort -n | tail -1)
-export MASTER_ADDR=127.0.0.1 MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000)) WORLD_SIZE=$NGPU LOCAL_WORLD_SIZE=$NGPU
+before=$(grep -h "Saved last checkpoint at update" $(ls -t $F5/repro/logs/f5-train-$TAG-*.out 2>/dev/null | head -5) 2>/dev/null | awk '{print $NF}' | sort -n | tail -1)
+export MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000)) WORLD_SIZE=$NGPU
 export ACCELERATE_MIXED_PRECISION=bf16 OMP_NUM_THREADS=1 F5_SAVE_ON_SIGTERM=1
-PIDS=()
-for r in $(seq 0 $((NGPU - 1))); do
-  RANK=$r LOCAL_RANK=$r python src/f5_tts/train/train.py --config-name $CFG.yaml \
+export F5_SAVES_PER_SESSION=${SAVES_PER_SESSION:-1}
+TRAIN="python src/f5_tts/train/train.py --config-name $CFG.yaml \
     ++datasets.batch_size_per_gpu=19200 ++datasets.max_samples=32 ++optim.grad_accumulation_steps=$ACCUM \
     ++datasets.num_workers=$NW ++ckpts.last_per_updates=${LAST:-500} \
-    ++ckpts.logger=${F5_LOGGER:-tensorboard} $EXTRA &
+    ++ckpts.logger=${F5_LOGGER:-tensorboard} $EXTRA"
+PIDS=()
+rc=0; session_end=0   # exit 3 = session finished after its save (all ranks exit 3 together)
+if [ "$SPREAD" = 1 ]; then
+  export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -1)
+  # NCCL on Babel (tested 2026-10-03 with repro/diag/nccl_test.*): native InfiniBand hangs (also with GPU-direct RDMA
+  # off) -> TCP over the IPoIB interface (1.36 GB allreduce, 2 nodes: ~0.6 s). Same-node P2P between GPUs of
+  # different srun tasks hangs -> shared memory instead (4 GPUs, one node: 0.31 s).
+  export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ib} NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
+  # one task per GPU; srun forwards our SIGTERM to every task. --gpu-bind=none: tasks on the same node see all of
+  # the node's allocated GPUs (NCCL's intra-node transport fails with per-task GPU isolation) and pick theirs by
+  # local id. --wait: 120 s after the first task ends, kill the rest (a crashed rank would leave the others
+  # hanging in NCCL; at a session end all ranks exit within seconds).
+  srun --ntasks=$NGPU --gpu-bind=none --kill-on-bad-exit=0 --wait=120 bash -c '
+    unset CUDA_VISIBLE_DEVICES  # do not inherit the batch step GPU list; see all job GPUs on this node
+    export RANK=$SLURM_PROCID LOCAL_RANK=$SLURM_LOCALID NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+    echo "rank $RANK on $(hostname -s) local $LOCAL_RANK -> $(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | sed -n "$((LOCAL_RANK + 1))p") (sees $(nvidia-smi -L | wc -l))"
+    exec '"$TRAIN" &
   PIDS+=($!)
-done
-# wait for all ranks; if any rank fails, tear down the rest (they'd hang in NCCL otherwise)
-rc=0
-for _ in "${PIDS[@]}"; do
-  wait -n; r=$?
-  if [ $r -ne 0 ]; then
-    rc=$r; log "a rank exited rc=$r; stopping the others"
-    kill -TERM "${PIDS[@]}" 2>/dev/null; sleep 20; kill -9 "${PIDS[@]}" 2>/dev/null
-    break
-  fi
-done
+  wait ${PIDS[0]}; r=$?
+  if [ $r -eq 3 ]; then session_end=1; elif [ $r -ne 0 ]; then rc=$r; log "a rank exited rc=$r"; fi
+else
+  export MASTER_ADDR=127.0.0.1 LOCAL_WORLD_SIZE=$NGPU
+  for r in $(seq 0 $((NGPU - 1))); do
+    RANK=$r LOCAL_RANK=$r $TRAIN &
+    PIDS+=($!)
+  done
+  # wait for all ranks; if any rank fails, tear down the rest (they'd hang in NCCL otherwise)
+  for _ in "${PIDS[@]}"; do
+    wait -n; r=$?
+    if [ $r -eq 3 ]; then session_end=1; continue; fi
+    if [ $r -ne 0 ]; then
+      rc=$r; log "a rank exited rc=$r; stopping the others"
+      kill -TERM "${PIDS[@]}" 2>/dev/null; sleep 20; kill -9 "${PIDS[@]}" 2>/dev/null
+      break
+    fi
+  done
+fi
 log "train exited rc=$rc"
 
+if [ $rc -eq 0 ] && [ $session_end = 1 ]; then
+  log "session complete; queueing next session"
+  echo 0 > $STATE/$TAG.fails
+  rm -f $LOCK   # release before resubmitting so the next session can't see this job as a live owner
+  resubmit "next session"
+  exit 0
+fi
 if [ $rc -eq 0 ]; then
   log "TRAINING COMPLETE"; touch $STATE/$TAG.done; rm -f $LOCK; exit 0
 fi
 
 # ---- crash: requeue on a different node unless we're making no progress ----
-after=$(grep -h "Saved last checkpoint at update" $F5/repro/logs/f5-train-$TAG-*.out 2>/dev/null | awk '{print $NF}' | sort -n | tail -1)
+after=$(grep -h "Saved last checkpoint at update" $(ls -t $F5/repro/logs/f5-train-$TAG-*.out 2>/dev/null | head -5) 2>/dev/null | awk '{print $NF}' | sort -n | tail -1)
 if [ "${after:-0}" != "${before:-0}" ]; then echo 0 > $STATE/$TAG.fails; fi
 fails=$(( $(cat $STATE/$TAG.fails 2>/dev/null || echo 0) + 1 )); echo $fails > $STATE/$TAG.fails
 if [ $fails -ge 3 ]; then

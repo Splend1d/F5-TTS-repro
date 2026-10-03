@@ -3,9 +3,11 @@ from __future__ import annotations
 import gc
 import math
 import os
+import random
 import signal
 import sys
 
+import numpy as np
 import torch
 import torchaudio
 import wandb
@@ -13,7 +15,7 @@ from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from ema_pytorch import EMA
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LinearLR, SequentialLR
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset, SequentialSampler
 from tqdm import tqdm
 
@@ -37,6 +39,7 @@ class Trainer:
         epochs,
         learning_rate,
         num_warmup_updates=20000,
+        total_updates: int | None = None,
         save_per_updates=1000,
         keep_last_n_checkpoints: int = -1,  # -1 to keep all, 0 to not save intermediate, > 0 to keep last N checkpoints
         checkpoint_path=None,
@@ -70,6 +73,11 @@ class Trainer:
         # opt-in: on SIGTERM (e.g. slurm preemption) save model_last and exit instead of dying mid-run
         self.save_on_sigterm = os.environ.get("F5_SAVE_ON_SIGTERM", "0") == "1"
         self._stop_requested = False
+        # opt-in: end the process (exit 3) after this many periodic model_last saves, for short Slurm sessions
+        self.saves_per_session = int(os.environ.get("F5_SAVES_PER_SESSION", "0"))
+        self._session_saves = 0
+        self._rng_seed = 0
+        self._rng_snapshot = None
         if self.save_on_sigterm:
             signal.signal(signal.SIGTERM, lambda signum, frame: setattr(self, "_stop_requested", True))
 
@@ -128,6 +136,7 @@ class Trainer:
 
         self.epochs = epochs
         self.num_warmup_updates = num_warmup_updates
+        self.total_updates = total_updates  # optional: pin the schedule length / end of training
         self.save_per_updates = save_per_updates
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
         self.last_per_updates = default(last_per_updates, save_per_updates)
@@ -160,7 +169,55 @@ class Trainer:
     def is_main(self):
         return self.accelerator.is_main_process
 
+    def _capture_rng(self):
+        return dict(
+            python=random.getstate(),
+            numpy=np.random.get_state(),
+            torch=torch.get_rng_state(),
+            cuda=torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+        )
+
+    def _rng_path(self):
+        return f"{self.checkpoint_path}/rng_last/rank{self.accelerator.process_index}.pt"
+
+    def _save_rng(self, update):
+        # every rank writes its own RNG state (taken at the last update boundary) before model_last.pt is replaced
+        state = dict(
+            self._rng_snapshot or self._capture_rng(), update=update, world_size=self.accelerator.num_processes
+        )
+        os.makedirs(os.path.dirname(self._rng_path()), exist_ok=True)
+        torch.save(state, self._rng_path() + ".tmp")
+        os.replace(self._rng_path() + ".tmp", self._rng_path())
+
+    def _restore_rng(self, update):
+        path = self._rng_path()
+        state = torch.load(path, weights_only=False) if os.path.exists(path) else None
+        if state and state["update"] == update and state["world_size"] == self.accelerator.num_processes:
+            random.setstate(state["python"])
+            np.random.set_state(state["numpy"])
+            torch.set_rng_state(state["torch"])
+            if state["cuda"] is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state(state["cuda"])
+            how = "restored"
+        else:
+            # no matching saved state (older checkpoint or different GPU count): deterministic per (seed, update, rank)
+            seed = (self._rng_seed * 1_000_003 + update * 1009 + self.accelerator.process_index) % 2**32
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            how = f"reseeded ({'no state' if not state else 'update/world size mismatch'})"
+        print(f"[rank {self.accelerator.process_index}] RNG {how} at update {update}")
+
+    def _set_scheduler_update(self, update):
+        # the LR is a closed-form function of the update count, so resuming only needs the count
+        self.scheduler.last_epoch = update
+        for group, base_lr, fn in zip(self.optimizer.param_groups, self.scheduler.base_lrs, self.scheduler.lr_lambdas):
+            group["lr"] = base_lr * fn(update)
+        self.scheduler._last_lr = [group["lr"] for group in self.optimizer.param_groups]
+
     def save_checkpoint(self, update, last=False):
+        if last:
+            self._save_rng(update)
         self.accelerator.wait_for_everyone()
         if self.is_main:
             checkpoint = dict(
@@ -261,9 +318,13 @@ class Trainer:
 
             self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["model_state_dict"])
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            if self.scheduler:
-                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             update = checkpoint["update"]
+            # scheduler_state_dict is not loaded: upstream's was stepped num_processes times per update, so it was
+            # only valid for the GPU count it was saved with. Rebuild the position from the update count instead.
+            if self.scheduler:
+                self._set_scheduler_update(update)
+            if latest_checkpoint == "model_last.pt":
+                self._restore_rng(update)
         else:
             checkpoint["model_state_dict"] = {
                 k.replace("ema_model.", ""): v
@@ -328,22 +389,27 @@ class Trainer:
         else:
             raise ValueError(f"batch_size_type must be either 'sample' or 'frame', but received {self.batch_size_type}")
 
-        #  accelerator.prepare() dispatches batches to devices;
-        #  which means the length of dataloader calculated before, should consider the number of devices
-        warmup_updates = (
-            self.num_warmup_updates * self.accelerator.num_processes
-        )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
-        # otherwise by default with split_batches=False, warmup steps change with num_processes
-        total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
-        decay_updates = total_updates - warmup_updates
-        warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
-        decay_scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=1e-8, total_iters=decay_updates)
-        self.scheduler = SequentialLR(
-            self.optimizer, schedulers=[warmup_scheduler, decay_scheduler], milestones=[warmup_updates]
-        )
-        train_dataloader, self.scheduler = self.accelerator.prepare(
-            train_dataloader, self.scheduler
-        )  # actual multi_gpu updates = single_gpu updates / gpu nums
+        #  accelerator.prepare() dispatches batches to devices (actual multi_gpu updates = single_gpu updates / gpu nums)
+        train_dataloader = self.accelerator.prepare(train_dataloader)
+
+        # Same curve as upstream (linear warmup from 1e-8, then linear decay to 1e-8 at the last update), but written
+        # as a function of the optimizer update count and stepped once per update instead of being wrapped by
+        # accelerate (which steps it num_processes times). The schedule and its resume no longer depend on GPU count.
+        warmup_updates = self.num_warmup_updates
+        # optim.total_updates pins the schedule and the end of training independent of the dataset size (e.g. keep a
+        # run's LR curve when switching datasets); training then runs as many epochs as it takes to reach it
+        updates_per_epoch = math.ceil(len(train_dataloader) / self.grad_accumulation_steps)
+        total_updates = self.total_updates or updates_per_epoch * self.epochs
+        num_epochs = math.ceil(total_updates / updates_per_epoch)
+        decay_updates = max(1, total_updates - warmup_updates)
+
+        def lr_factor(update):
+            if update < warmup_updates:
+                return 1e-8 + (1.0 - 1e-8) * update / warmup_updates
+            return 1.0 + (1e-8 - 1.0) * min(update - warmup_updates, decay_updates) / decay_updates
+
+        self.scheduler = LambdaLR(self.optimizer, lr_factor)
+        self._rng_seed = resumable_with_seed or 0
         start_update = self.load_checkpoint()
         global_update = start_update
 
@@ -356,7 +422,9 @@ class Trainer:
         else:
             skipped_epoch = 0
 
-        for epoch in range(skipped_epoch, self.epochs):
+        for epoch in range(skipped_epoch, num_epochs):
+            if global_update >= total_updates:
+                break
             self.model.train()
             if exists(resumable_with_seed) and epoch == skipped_epoch:
                 progress_bar_initial = math.ceil(skipped_batch / self.grad_accumulation_steps)
@@ -371,9 +439,9 @@ class Trainer:
 
             progress_bar = tqdm(
                 range(math.ceil(len(train_dataloader) / self.grad_accumulation_steps)),
-                desc=f"Epoch {epoch + 1}/{self.epochs}",
+                desc=f"Epoch {epoch + 1}/{num_epochs}",
                 unit="update",
-                disable=not self.accelerator.is_local_main_process,
+                disable=not self.accelerator.is_main_process,  # one bar even when every task is its own "local main"
                 initial=progress_bar_initial,
             )
 
@@ -397,7 +465,8 @@ class Trainer:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
                     self.optimizer.step()
-                    self.scheduler.step()
+                    if self.accelerator.sync_gradients:
+                        self.scheduler.step()
                     self.optimizer.zero_grad()
 
                 if self.accelerator.sync_gradients:
@@ -405,6 +474,7 @@ class Trainer:
                         self.ema_model.update()
 
                     global_update += 1
+                    self._rng_snapshot = self._capture_rng()  # what a resume from this update restores
                     progress_bar.update(1)
                     progress_bar.set_postfix(update=str(global_update), loss=loss.item())
 
@@ -432,7 +502,7 @@ class Trainer:
                 if global_update % self.save_per_updates == 0 and self.accelerator.sync_gradients:
                     self.save_checkpoint(global_update)
 
-                    if self.log_samples and self.accelerator.is_local_main_process:
+                    if self.log_samples and self.accelerator.is_main_process:
                         ref_audio_len = mel_lengths[0]
                         infer_text = [
                             text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]
@@ -463,6 +533,23 @@ class Trainer:
                             f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate
                         )
                         self.model.train()
+
+                if (
+                    self.saves_per_session
+                    and global_update < total_updates  # at the last update, finish the run instead
+                    and global_update % self.last_per_updates == 0
+                    and self.accelerator.sync_gradients
+                ):
+                    self._session_saves += 1
+                    if self._session_saves >= self.saves_per_session:
+                        if self.is_main:
+                            print(f"Session done after {self._session_saves} save(s) at update {global_update}")
+                        self.accelerator.wait_for_everyone()
+                        self.accelerator.end_training()
+                        sys.exit(3)
+
+                if global_update >= total_updates and self.accelerator.sync_gradients:
+                    break
 
         self.save_checkpoint(global_update, last=True)
 
