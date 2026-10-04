@@ -157,7 +157,16 @@ if [ $fails -ge 3 ]; then
   log "3 consecutive crashes without progress -> NOT resubmitting; needs debugging"; rm -f $LOCK; exit 1
 fi
 # only blame the node for GPU-looking failures
-bad=""; tail -c 200000 $F5/repro/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out | grep -qiE "CUDA error|NCCL|ECC|uncorrectable|Xid|device-side|CUBLAS|cuDNN error|illegal memory" && bad=$SLURMD_NODENAME
+# only blame nodes for GPU-looking failures. Spread mode: the node(s) whose task exited with an error (srun reports
+# "srun: error: NODE: task N: Exited with exit code"; the others show "Killed"), not the node running this script.
+bad=""; LOG=$F5/repro/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out
+if tail -c 200000 $LOG | grep -qiE "CUDA error|NCCL|ECC|uncorrectable|Xid|device-side|CUBLAS|cuDNN error|illegal memory"; then
+  if [ "$SPREAD" = 1 ]; then
+    bad=$(tail -c 200000 $LOG | grep -oE "srun: error: [^:]+: tasks? [0-9,-]+: Exited with exit code" | awk '{print $3}' | tr -d : | sort -u | paste -sd,)
+  else
+    bad=$SLURMD_NODENAME
+  fi
+fi
 resubmit "crash rc=$rc (#$fails)" $bad
 rm -f $LOCK
 exit $rc
