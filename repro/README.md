@@ -1,30 +1,38 @@
 # F5-TTS v1 Base reproduction (Emilia ZH+EN)
 
-This folder reproduces `F5TTS_v1_Base` (DiT, 1.25M updates) from scratch on Emilia ZH+EN. It is a fork of
+This folder reproduces `F5TTS_v1_Base` (DiT, 1.25M updates) from scratch on Emilia: ZH+EN for the first 5,500
+updates, then EN only (see [Training data](#training-data)). It is a fork of
 [SWivid/F5-TTS](https://github.com/SWivid/F5-TTS) at `2832525` (v1.1.22). The training scripts are set up for
 a preemptible SLURM cluster (CMU babel).
 
 - **Live dashboard:** https://splend1d.github.io/F5-TTS-repro/ (refreshed every 6 h)
-- **Checkpoint (private):** https://huggingface.co/SpeechGenCourse/F5TTS_v1_Base_Emilia_ZH_EN_repro
+- **Checkpoint:** https://huggingface.co/SpeechGenCourse/F5TTS_v1_Base_Emilia_ZH_EN_repro
 - **W&B:** project `splend1dchan/CFM-TTS`, run id `f5tts-main-20260930`
   (https://wandb.ai/splend1dchan/CFM-TTS/runs/f5tts-main-20260930). This run is created on the first resume
   after 2026-10-01. Updates 0–5,631 were logged to TensorBoard; those event files are in the HF repo under `runs/`.
 
-## Current progress (2026-10-01)
+## Training data
+
+The training data is not the same throughout the run:
+
+- **Updates 0–5,500:** Emilia ZH+EN (37.8M utterances, about 95k h).
+- **From update 5,500 on:** Emilia EN only (18.1M utterances, 46,643 h), a subset of the same data.
+- The LR schedule is still pinned to the original ZH+EN end point.
+
+Details: the EN set is `data/Emilia_EN_pinyin`, cut from the ZH+EN set by `repro/make_en_subset.py`. Its checkpoints
+go to `ckpts/F5TTS_v1_Base_vocos_pinyin_Emilia_EN`. `optim.total_updates=1271061` keeps the LR schedule and the end of
+training identical to the ZH+EN run (11 × 115,551 updates). These overrides live in `repro/state/main.env`.
+
+## Current progress (2026-10-05)
 
 | | |
 |---|---|
-| Latest checkpoint | `model_last.pt` @ **update 5,500** / 1,250,000 (0.44%) |
-| Epoch | 1 / 11 (115,551 updates per epoch) |
-| Train loss | ~0.94–1.05 at update ~5.6k |
-| Throughput | ~4.76 s/update on 4× RTX A6000 (accum 4); 5,500 updates took 7 h 16 min |
-| LR | still in warmup (20k updates, peak 7.5e-5) |
-| Eval | none yet; a sanity check is planned, and the first real comparison at 50k |
-
-**Data switch (2026-10-03):** from update 5,500 the run continues on **Emilia EN only** (`data/Emilia_EN_pinyin`,
-18.1M utterances, 46,643 h, cut from the ZH+EN set by `repro/make_en_subset.py`). Checkpoints go to
-`ckpts/F5TTS_v1_Base_vocos_pinyin_Emilia_EN`. `optim.total_updates=1271061` keeps the LR schedule and the end of
-training identical to the ZH+EN run (11 × 115,551 updates). These overrides live in `repro/state/main.env`.
+| Latest checkpoint on HF | `model_last.pt` @ **update 40,000** / 1,271,061 (3.1%) |
+| Train loss | ~0.8–1.1 at update ~40k |
+| Throughput | ~2.44 s/update on 4× L40S, one node (accum 4) |
+| LR | past warmup (20k updates, peak 7.5e-5), now in linear decay |
+| Jobs | one uninterrupted 2-day job on `general` (any 4 GPUs), resubmitting itself at the time limit |
+| Eval | none yet; the first real comparison is planned at 50k |
 
 The checkpoint is the full resumable state: model, EMA, optimizer, scheduler and `update`.
 
