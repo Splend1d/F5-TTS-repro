@@ -189,6 +189,29 @@ python repro/report.py --all
 The venv is `repro/requirements.sem.lock.txt`: the main tree's packages plus PyLate and its pinned
 sentence-transformers and transformers.
 
+## Word-level prosody correlation
+
+How closely a system's F0 and energy contours follow the real recording of the same sentence, after Xie et al.
+(Findings of EMNLP 2026). Both recordings are force-aligned to the target words (torchaudio MMS_FA). Each word is
+resampled to 20 points of pYAAPT F0 and RMS energy, both divided by the utterance mean, and the score is Spearman ρ
+between the two point sequences.
+
+- `repro/prosody_corr.py`: ρ per utterance and its mean over utterances (macro), a shuffled-word baseline, 95% CIs
+  from a bootstrap over speakers, and paired comparisons (`--compare A:B`). Features are cached per system in
+  `<out>/cache/`, so adding a system computes only that system. `--testset` (any Seed-TTS-layout set with
+  `wavs/<utt>.wav`) and `--speaker-field` take it beyond Seed-TTS test-en.
+- `repro/prosody_micro.py`: macro next to micro (all points pooled into one ρ, which also rewards matching each
+  utterance's range), on the same utterances and bootstrap.
+- `repro/prosody_examples.py`: contour plots of chosen utterances, drawn from the metric's cache.
+- `repro/prosody_corr.sbatch`: the Seed-TTS test-en comparison of emilia_small, +ColBERT, +ModernBERT and the
+  released v1 Base.
+
+```bash
+python repro/prosody_corr.py --out results/_analysis/prosody --compare bert250k:small250k \
+  small250k=results/emilia_small/update_250000/seedtts_test_en bert250k=results/emilia_small_bert/update_250000/seedtts_test_en
+python repro/prosody_micro.py --prosody-dir results/_analysis/prosody small250k bert250k --compare bert250k:small250k
+```
+
 ## Progress page
 
 `docs/` is served by GitHub Pages. `repro/progress/update.sh` runs `export.py`, which writes `docs/metrics.json`
