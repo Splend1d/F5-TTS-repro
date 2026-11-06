@@ -53,6 +53,9 @@ def main():
     )
 
     parser.add_argument("--local", action="store_true", help="Use local vocoder checkpoint directory")
+    parser.add_argument("--ckpt_path", default=None, help="Explicit checkpoint file (overrides the -n/-c lookup)")
+    parser.add_argument("--output_dir", default=None, help="Explicit directory for generated wavs")
+    parser.add_argument("--no_ema", action="store_true", help="Use the online (non-EMA) weights")
 
     args = parser.parse_args()
 
@@ -110,6 +113,9 @@ def main():
         f"{'_no-ref-audio' if no_ref_audio else ''}"
     )
 
+    if args.output_dir:
+        output_dir = args.output_dir
+
     # -------------------------------------------------#
 
     prompts_all = get_inference_prompt(
@@ -154,7 +160,9 @@ def main():
     ).to(device)
 
     ckpt_prefix = rel_path + f"/ckpts/{exp_name}/model_{ckpt_step}"
-    if os.path.exists(ckpt_prefix + ".pt"):
+    if args.ckpt_path:
+        ckpt_path = args.ckpt_path
+    elif os.path.exists(ckpt_prefix + ".pt"):
         ckpt_path = ckpt_prefix + ".pt"
     elif os.path.exists(ckpt_prefix + ".safetensors"):
         ckpt_path = ckpt_prefix + ".safetensors"
@@ -169,7 +177,7 @@ def main():
             raise ValueError("The checkpoint does not exist or cannot be found in given location.")
 
     dtype = torch.float32 if mel_spec_type == "bigvgan" else None
-    model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema)
+    model = load_checkpoint(model, ckpt_path, device, dtype=dtype, use_ema=use_ema and not args.no_ema)
 
     if not os.path.exists(output_dir) and accelerator.is_main_process:
         os.makedirs(output_dir)

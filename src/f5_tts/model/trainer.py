@@ -4,8 +4,11 @@ import gc
 import math
 import os
 import random
+import shlex
 import signal
+import subprocess
 import sys
+import threading
 
 import numpy as np
 import torch
@@ -237,7 +240,19 @@ class Trainer:
             else:
                 if self.keep_last_n_checkpoints == 0:
                     return
-                self.accelerator.save(checkpoint, f"{self.checkpoint_path}/model_{update}.pt")
+                path = f"{self.checkpoint_path}/model_{update}.pt"
+                self.accelerator.save(checkpoint, path + ".tmp")
+                os.replace(path + ".tmp", path)
+                print(f"Saved checkpoint {path}")
+                # opt-in hook, e.g. queue an eval of this checkpoint; runs detached so training never waits on it
+                hook = os.environ.get("F5_ON_CHECKPOINT")
+                if hook:
+                    try:
+                        subprocess.Popen(
+                            shlex.split(hook) + [os.path.abspath(path), str(update)], start_new_session=True
+                        )
+                    except Exception as e:  # never let the hook stop training
+                        print(f"F5_ON_CHECKPOINT failed: {e}")
                 if self.keep_last_n_checkpoints > 0:
                     # Updated logic to exclude pretrained model from rotation
                     checkpoints = [
@@ -544,9 +559,16 @@ class Trainer:
                     if self._session_saves >= self.saves_per_session:
                         if self.is_main:
                             print(f"Session done after {self._session_saves} save(s) at update {global_update}")
-                        self.accelerator.wait_for_everyone()
-                        self.accelerator.end_training()
-                        sys.exit(3)
+                        self.accelerator.wait_for_everyone()  # checkpoint is fully written past this barrier
+                        # graceful teardown (W&B finish, process group, DataLoader workers) sometimes hangs for the
+                        # rest of the session after a multi-node run; give rank 0 2 min to flush W&B, then hard-exit
+                        if self.is_main:
+                            t = threading.Thread(target=self.accelerator.end_training, daemon=True)
+                            t.start()
+                            t.join(120)
+                        sys.stdout.flush()
+                        sys.stderr.flush()
+                        os._exit(3)
 
                 if global_update >= total_updates and self.accelerator.sync_gradients:
                     break
