@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--ckpt_path", default=None, help="Explicit checkpoint file (overrides the -n/-c lookup)")
     parser.add_argument("--output_dir", default=None, help="Explicit directory for generated wavs")
     parser.add_argument("--no_ema", action="store_true", help="Use the online (non-EMA) weights")
+    parser.add_argument("--metalst", default=None, help="Seed-TTS-format meta.lst of another test set (-t names it)")
 
     args = parser.parse_args()
 
@@ -89,7 +90,10 @@ def main():
     win_length = model_cfg.model.mel_spec.win_length
     n_fft = model_cfg.model.mel_spec.n_fft
 
-    if testset == "ls_pc_test_clean":
+    if args.metalst:
+        metainfo = get_seedtts_testset_metainfo(args.metalst)
+
+    elif testset == "ls_pc_test_clean":
         metalst = rel_path + "/data/librispeech_pc_test_clean_cross_sentence.lst"
         librispeech_test_clean_path = args.librispeech_test_clean_path
         metainfo = get_librispeech_test_clean_metainfo(metalst, librispeech_test_clean_path)

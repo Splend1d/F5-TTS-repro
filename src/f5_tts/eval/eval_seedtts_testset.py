@@ -29,6 +29,7 @@ def get_args():
         "-n", "--gpu_nums", type=str, default="8", help="Number of GPUs to use (e.g., 8) or GPU list (e.g., [0,1,2,3])"
     )
     parser.add_argument("--local", action="store_true", help="Use local custom checkpoint directory")
+    parser.add_argument("--metalst", default=None, help="Seed-TTS-format meta.lst of another test set")
     return parser.parse_args()
 
 
@@ -50,7 +51,7 @@ def main():
     eval_task = args.eval_task
     lang = args.lang
     gen_wav_dir = args.gen_wav_dir
-    metalst = rel_path + f"/data/seedtts_testset/{lang}/meta.lst"  # seed-tts testset
+    metalst = args.metalst or rel_path + f"/data/seedtts_testset/{lang}/meta.lst"  # seed-tts testset
 
     # NOTE. paraformer-zh result will be slightly different according to the number of gpus, cuz batchsize is different
     #       zh 1.254 seems a result of 4 workers wer_seed_tts
