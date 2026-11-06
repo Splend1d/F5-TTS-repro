@@ -18,12 +18,27 @@
 #SBATCH --output=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS-sem/repro/logs/%x-%j.out
 source /data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS-sem/repro/env.sh
 STATE=$F5/repro/state; mkdir -p $STATE
+# per-run settings (EXTRA overrides, W&B ids, F5_ON_CHECKPOINT, ...) are re-read at every session start, so edits to
+# repro/state/<tag>.env take effect from the next session without restarting the run
+[ -n "$TAG" ] && [ -f $STATE/$TAG.env ] && source $STATE/$TAG.env
 CFG=${CFG:-F5TTS_v1_Base}
 EXTRA=${EXTRA:-}   # extra hydra overrides (e.g. for smoke tests)
 TAG=${TAG:-main}   # separate lock/state namespace per run
 LOCK=$STATE/$TAG.lock
 
 log() { echo "[$(date '+%F %T')] [$SLURM_JOB_ID@$SLURMD_NODENAME] $*"; }
+
+# preemption can hit during startup, before the full handler below is installed; without this the chain dies
+early_term() {
+  log "SIGTERM during startup"
+  [ "$(cat $LOCK 2>/dev/null)" = "$SLURM_JOB_ID" ] && rm -f $LOCK
+  if [ -f $STATE/$TAG.stop ]; then log "stop file present, not resubmitting"
+  else log "resubmitting (preempted during startup)"; bash $F5/repro/submit_train.sh; fi
+  exit 0
+}
+trap early_term TERM
+# a queued job (e.g. a TAKEOVER copy) that starts after the run finished has nothing to do
+[ -f $STATE/$TAG.done ] && { log "$TAG already done; exiting"; exit 0; }
 
 # ---- single-winner lock: cancel sibling pending jobs, bail if another copy is alive ----
 if [ -f $LOCK ]; then
@@ -38,7 +53,13 @@ if [ -f $LOCK ]; then
       rm -f $STATE/$TAG.stop
       log "job $owner has exited; continuing from its checkpoint"
     else
-      log "run owned by running job $owner; exiting"; exit 0
+      # a preempted/ending owner resubmits us BEFORE it has finished exiting; give it time to leave so the chain
+      # does not die here. Only a copy that is still alive after 5 min is a real duplicate.
+      for _ in $(seq 30); do squeue -h -j "$owner" 2>/dev/null | grep -q . || break; sleep 10; done
+      if squeue -h -j "$owner" 2>/dev/null | grep -q .; then
+        log "run owned by running job $owner (still alive after 5 min); exiting"; exit 0
+      fi
+      log "previous owner $owner has exited; taking over"
     fi
   fi
 fi
@@ -48,10 +69,11 @@ for j in $(squeue -h -u $USER -n $SLURM_JOB_NAME -t PD -o %i); do
 done
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# SPREAD=1: the job is N tasks x 1 GPU that may sit on different nodes (submit_train.sh --ntasks/--gpus-per-task);
+# SPREAD=1 / node: the job is N tasks x 1 GPU that may sit on different nodes (submit_train.sh --ntasks/--gpus-per-task)
+# or on one node (SPREAD=node);
 # ranks are started with srun and talk over the network (InfiniBand). Otherwise: all GPUs on this node.
 SPREAD=${SPREAD:-0}
-if [ "$SPREAD" = 1 ]; then
+if [ "$SPREAD" != 0 ]; then
   NGPU=$SLURM_NTASKS
   NW=$(( SLURM_CPUS_PER_TASK - 1 ))
   log "nodes: $SLURM_JOB_NODELIST"
@@ -101,7 +123,7 @@ TRAIN="python src/f5_tts/train/train.py --config-name $CFG.yaml \
     ++ckpts.logger=${F5_LOGGER:-tensorboard} $EXTRA"
 PIDS=()
 rc=0; session_end=0   # exit 3 = session finished after its save (all ranks exit 3 together)
-if [ "$SPREAD" = 1 ]; then
+if [ "$SPREAD" != 0 ]; then
   export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -1)
   # NCCL on Babel (tested 2026-10-03 with repro/diag/nccl_test.*): native InfiniBand hangs (also with GPU-direct RDMA
   # off) -> TCP over the IPoIB interface (1.36 GB allreduce, 2 nodes: ~0.6 s). Same-node P2P between GPUs of
@@ -161,7 +183,7 @@ fi
 # "srun: error: NODE: task N: Exited with exit code"; the others show "Killed"), not the node running this script.
 bad=""; LOG=$F5/repro/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out
 if tail -c 200000 $LOG | grep -qiE "CUDA error|NCCL|ECC|uncorrectable|Xid|device-side|CUBLAS|cuDNN error|illegal memory"; then
-  if [ "$SPREAD" = 1 ]; then
+  if [ "$SPREAD" != 0 ]; then
     bad=$(tail -c 200000 $LOG | grep -oE "srun: error: [^:]+: tasks? [0-9,-]+: Exited with exit code" | awk '{print $3}' | tr -d : | sort -u | paste -sd,)
   else
     bad=$SLURMD_NODENAME
