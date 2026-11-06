@@ -8,9 +8,9 @@
 #SBATCH --mem=128G
 #SBATCH --time=1-00:00:00
 #SBATCH --requeue
-#SBATCH --output=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS/repro/logs/%x-%j.out
+#SBATCH --output=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS-sem/repro/logs/%x-%j.out
 set -eo pipefail
-source /data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS/repro/env.sh
+source /data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS-sem/repro/env.sh
 export PYTHONWARNINGS="ignore::UserWarning,ignore::FutureWarning"
 MODEL=${MODEL:-F5TTS_v1_Base_official}; STEP=${STEP:-1250000}; SEEDS=${SEEDS:-"0 1 2"}
 TASKS=${TASKS:-"seedtts_test_zh seedtts_test_en ls_pc_test_clean"}

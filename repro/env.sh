@@ -1,6 +1,6 @@
 # Common env for F5-TTS reproduction. All caches on UTD-NAS (home & user_data are full).
 export R=/data/group_data/UTD-NAS/chanjanh/speechgen
-export F5=$R/F5-TTS
+export F5=$R/F5-TTS-sem
 export HF_TOKEN=$(cat /data/user_data/chanjanh/.cache/huggingface/token)
 export HF_HOME=$R/cache/hf_home
 export HF_HUB_CACHE=$R/cache/hf_hub

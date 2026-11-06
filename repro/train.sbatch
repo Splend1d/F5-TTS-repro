@@ -15,8 +15,8 @@
 #SBATCH --time=00:45:00
 #SBATCH --no-requeue
 #SBATCH --signal=B:TERM@110
-#SBATCH --output=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS/repro/logs/%x-%j.out
-source /data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS/repro/env.sh
+#SBATCH --output=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS-sem/repro/logs/%x-%j.out
+source /data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS-sem/repro/env.sh
 STATE=$F5/repro/state; mkdir -p $STATE
 CFG=${CFG:-F5TTS_v1_Base}
 EXTRA=${EXTRA:-}   # extra hydra overrides (e.g. for smoke tests)

@@ -3,7 +3,7 @@
 # SPREAD=1: n tasks x 1 GPU anywhere (multi-node DDP) instead of n GPUs on one node
 # Env passthrough: CFG, EXTRA, TAG, LAST, SAVES_PER_SESSION (default 1), VARIANTS ("8 4"), PART/QOS/TLIMIT, GTYPE (e.g. A100_80GB), TAKEOVER
 # e.g. general A100s:  PART=general QOS=normal GTYPE=A100_80GB VARIANTS=8 TAKEOVER=1 bash repro/submit_train.sh
-F5=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS
+F5=/data/group_data/UTD-NAS/chanjanh/speechgen/F5-TTS-sem
 TAG=${TAG:-main}; STATE=$F5/repro/state; mkdir -p $STATE
 [ -f $STATE/$TAG.done ] && { echo "$TAG already done"; exit 0; }
 [ -f $STATE/$TAG.stop ] && { echo "$TAG stopped (rm $STATE/$TAG.stop to allow)"; exit 0; }
