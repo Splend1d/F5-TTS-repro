@@ -574,5 +574,14 @@ class Trainer:
                     break
 
         self.save_checkpoint(global_update, last=True)
+        self.accelerator.wait_for_everyone()  # checkpoint is fully written past this barrier
 
-        self.accelerator.end_training()
+        # same guard as a session end: after the final save, end_training (W&B finish, process group) hung for hours
+        # on both 4-rank runs (2026-10-22/23); give rank 0 2 min to flush W&B, then exit
+        if self.is_main:
+            t = threading.Thread(target=self.accelerator.end_training, daemon=True)
+            t.start()
+            t.join(120)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
