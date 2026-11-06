@@ -43,6 +43,9 @@ class Trainer:
         learning_rate,
         num_warmup_updates=20000,
         total_updates: int | None = None,
+        end_update: int | None = None,  # stop training here; unlike total_updates it leaves the LR schedule alone
+        init_checkpoint: str | None = None,  # a fresh run starts from these weights (see load_init_checkpoint)
+        rewarm_updates: int = 0,  # after init_checkpoint, ramp the LR up again over this many updates
         save_per_updates=1000,
         keep_last_n_checkpoints: int = -1,  # -1 to keep all, 0 to not save intermediate, > 0 to keep last N checkpoints
         checkpoint_path=None,
@@ -140,6 +143,10 @@ class Trainer:
         self.epochs = epochs
         self.num_warmup_updates = num_warmup_updates
         self.total_updates = total_updates  # optional: pin the schedule length / end of training
+        self.end_update = end_update
+        self.init_checkpoint = init_checkpoint
+        self.rewarm_updates = rewarm_updates
+        self._init_update = None  # update of init_checkpoint; saved with this run's checkpoints for the re-warmup
         self.save_per_updates = save_per_updates
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
         self.last_per_updates = default(last_per_updates, save_per_updates)
@@ -230,6 +237,8 @@ class Trainer:
                 scheduler_state_dict=self.scheduler.state_dict(),
                 update=update,
             )
+            if self._init_update is not None:
+                checkpoint["init_update"] = self._init_update
             if not os.path.exists(self.checkpoint_path):
                 os.makedirs(self.checkpoint_path)
             if last:
@@ -269,13 +278,48 @@ class Trainer:
                         os.remove(os.path.join(self.checkpoint_path, oldest_checkpoint))
                         print(f"Removed old checkpoint: {oldest_checkpoint}")
 
+    def load_init_checkpoint(self, path):
+        """Start this (empty) run from another run's training checkpoint.
+
+        Online and EMA weights are loaded; parameters the checkpoint does not have (new modules, e.g. the semantic
+        input) keep their initialization and must be the only missing keys. The optimizer starts fresh, since its
+        parameter list changed, and the update count continues from the checkpoint, so the data order and the LR
+        schedule pick up where that run was (with rewarm_updates of warmup on top).
+        """
+        checkpoint = torch.load(path, weights_only=True, map_location="cpu")
+        mel_keys = ["mel_spec.mel_stft.mel_scale.fb", "mel_spec.mel_stft.spectrogram.window"]
+        model = self.accelerator.unwrap_model(self.model)
+        missing, unexpected = model.load_state_dict(
+            {k: v for k, v in checkpoint["model_state_dict"].items() if k not in mel_keys}, strict=False
+        )
+        new = sorted(missing)
+        if unexpected or not new or any(".sem_" not in k for k in new):
+            raise RuntimeError(f"{path} does not fit this model: missing {new}, unexpected {sorted(unexpected)}")
+        if self.is_main:
+            ema_weights = checkpoint["ema_model_state_dict"]
+            missing, unexpected = self.ema_model.load_state_dict(
+                {k: v for k, v in ema_weights.items() if k.removeprefix("ema_model.") not in mel_keys}, strict=False
+            )
+            if unexpected or sorted(missing) != [f"ema_model.{k}" for k in new]:
+                raise RuntimeError(
+                    f"{path} EMA does not fit: missing {sorted(missing)}, unexpected {sorted(unexpected)}"
+                )
+            print(f"Initialised from {path} at update {checkpoint['update']}; new parameters at their init: {new}")
+        update = self._init_update = checkpoint["update"]
+        del checkpoint
+        gc.collect()
+        if self.scheduler:
+            self._set_scheduler_update(update)
+        self._restore_rng(update)  # no RNG state for this run yet -> deterministic per (seed, update, rank)
+        return update
+
     def load_checkpoint(self):
         if (
             not exists(self.checkpoint_path)
             or not os.path.exists(self.checkpoint_path)
             or not any(filename.endswith((".pt", ".safetensors")) for filename in os.listdir(self.checkpoint_path))
         ):
-            return 0
+            return self.load_init_checkpoint(self.init_checkpoint) if self.init_checkpoint else 0
 
         self.accelerator.wait_for_everyone()
         if "model_last.pt" in os.listdir(self.checkpoint_path):
@@ -334,6 +378,7 @@ class Trainer:
             self.accelerator.unwrap_model(self.model).load_state_dict(checkpoint["model_state_dict"])
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             update = checkpoint["update"]
+            self._init_update = checkpoint.get("init_update")
             # scheduler_state_dict is not loaded: upstream's was stepped num_processes times per update, so it was
             # only valid for the GPU count it was saved with. Rebuild the position from the update count instead.
             if self.scheduler:
@@ -417,11 +462,17 @@ class Trainer:
         total_updates = self.total_updates or updates_per_epoch * self.epochs
         num_epochs = math.ceil(total_updates / updates_per_epoch)
         decay_updates = max(1, total_updates - warmup_updates)
+        stop_update = min(total_updates, self.end_update or total_updates)  # end_update stops early, same schedule
 
         def lr_factor(update):
             if update < warmup_updates:
-                return 1e-8 + (1.0 - 1e-8) * update / warmup_updates
-            return 1.0 + (1e-8 - 1.0) * min(update - warmup_updates, decay_updates) / decay_updates
+                factor = 1e-8 + (1.0 - 1e-8) * update / warmup_updates
+            else:
+                factor = 1.0 + (1e-8 - 1.0) * min(update - warmup_updates, decay_updates) / decay_updates
+            if self._init_update is not None and self.rewarm_updates > 0:
+                # started from another run's weights with a fresh optimizer: warm up again onto the same curve
+                factor *= 1e-8 + (1.0 - 1e-8) * min(max(update - self._init_update, 0) / self.rewarm_updates, 1.0)
+            return factor
 
         self.scheduler = LambdaLR(self.optimizer, lr_factor)
         self._rng_seed = resumable_with_seed or 0
@@ -438,7 +489,7 @@ class Trainer:
             skipped_epoch = 0
 
         for epoch in range(skipped_epoch, num_epochs):
-            if global_update >= total_updates:
+            if global_update >= stop_update:
                 break
             self.model.train()
             if exists(resumable_with_seed) and epoch == skipped_epoch:
@@ -551,7 +602,7 @@ class Trainer:
 
                 if (
                     self.saves_per_session
-                    and global_update < total_updates  # at the last update, finish the run instead
+                    and global_update < stop_update  # at the last update, finish the run instead
                     and global_update % self.last_per_updates == 0
                     and self.accelerator.sync_gradients
                 ):
@@ -570,7 +621,7 @@ class Trainer:
                         sys.stderr.flush()
                         os._exit(3)
 
-                if global_update >= total_updates and self.accelerator.sync_gradients:
+                if global_update >= stop_update and self.accelerator.sync_gradients:
                     break
 
         self.save_checkpoint(global_update, last=True)
