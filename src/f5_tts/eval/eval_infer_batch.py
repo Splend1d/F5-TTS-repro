@@ -157,6 +157,7 @@ def main():
             method=ode_method,
         ),
         vocab_char_map=vocab_char_map,
+        sem_encoder=model_cfg.model.get("sem_encoder", None),
     ).to(device)
 
     ckpt_prefix = rel_path + f"/ckpts/{exp_name}/model_{ckpt_step}"

@@ -244,6 +244,7 @@ def load_model(
     ode_method=ode_method,
     use_ema=True,
     device=device,
+    sem_encoder=None,  # model.sem_encoder of the config, for models with semantic conditioning
 ):
     if vocab_file == "":
         vocab_file = str(files("f5_tts").joinpath("infer/examples/vocab.txt"))
@@ -268,6 +269,7 @@ def load_model(
             method=ode_method,
         ),
         vocab_char_map=vocab_char_map,
+        sem_encoder=sem_encoder,
     ).to(device)
 
     dtype = torch.float32 if mel_spec_type == "bigvgan" else None

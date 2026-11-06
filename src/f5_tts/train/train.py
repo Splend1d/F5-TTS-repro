@@ -43,6 +43,7 @@ def main(model_cfg):
         transformer=model_cls(**model_arc, text_num_embeds=vocab_size, mel_dim=model_cfg.model.mel_spec.n_mel_channels),
         mel_spec_kwargs=model_cfg.model.mel_spec,
         vocab_char_map=vocab_char_map,
+        sem_encoder=model_cfg.model.get("sem_encoder", None),
     )
 
     # init trainer

@@ -20,6 +20,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
 
 from f5_tts.model.modules import MelSpec
+from f5_tts.model.semantic import get_semantic_encoder
 from f5_tts.model.utils import (
     default,
     exists,
@@ -48,6 +49,7 @@ class CFM(nn.Module):
         mel_spec_kwargs: dict = dict(),
         frac_lengths_mask: tuple[float, float] = (0.7, 1.0),
         vocab_char_map: dict[str:int] | None = None,
+        sem_encoder: str | None = None,  # frozen ColBERT model whose token vectors go on the text (model/semantic.py)
     ):
         super().__init__()
 
@@ -76,9 +78,21 @@ class CFM(nn.Module):
         # vocab map for tokenization
         self.vocab_char_map = vocab_char_map
 
+        # semantic conditioning: only the encoder's name is kept here (see model/semantic.py)
+        self.sem_encoder = sem_encoder
+
     @property
     def device(self):
         return next(self.parameters()).device
+
+    def semantics(self, text: list[list[str]], device) -> dict:
+        """Transformer kwargs with the semantic vectors for this text ({} when the model has none)."""
+        if self.sem_encoder is None:
+            return {}
+        if not isinstance(text, list):
+            raise ValueError("semantic conditioning needs the text as lists of characters, not token ids")
+        sem, sem_mask = get_semantic_encoder(self.sem_encoder)(text, device)
+        return dict(sem=sem, sem_mask=sem_mask)
 
     @torch.no_grad()
     def sample(
@@ -116,6 +130,7 @@ class CFM(nn.Module):
 
         # text
 
+        sem_kwargs = self.semantics(text, device)  # once per sample() call, reused at every ODE step
         if isinstance(text, list):
             if exists(self.vocab_char_map):
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
@@ -174,6 +189,7 @@ class CFM(nn.Module):
                     drop_audio_cond=False,
                     drop_text=False,
                     cache=True,
+                    **sem_kwargs,
                 )
                 return pred
 
@@ -186,6 +202,7 @@ class CFM(nn.Module):
                 mask=mask,
                 cfg_infer=True,
                 cache=True,
+                **sem_kwargs,
             )
             pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
             return pred + (pred - null_pred) * cfg_strength
@@ -245,6 +262,7 @@ class CFM(nn.Module):
         batch, seq_len, dtype, device, _σ1 = *inp.shape[:2], inp.dtype, self.device, self.sigma
 
         # handle text as string
+        sem_kwargs = self.semantics(text, device)
         if isinstance(text, list):
             if exists(self.vocab_char_map):
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
@@ -292,8 +310,9 @@ class CFM(nn.Module):
 
         # apply mask will use more memory; might adjust batchsize or batchsampler long sequence threshold
         pred = self.transformer(
-            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask
-        )
+            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask,
+            **sem_kwargs,
+        )  # fmt: skip
 
         # flow matching loss
         loss = F.mse_loss(pred, flow, reduction="none")

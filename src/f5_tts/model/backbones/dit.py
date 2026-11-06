@@ -143,10 +143,19 @@ class TextEmbedding(nn.Module):
 
 
 class InputEmbedding(nn.Module):
-    def __init__(self, mel_dim, text_dim, out_dim):
+    def __init__(self, mel_dim, text_dim, out_dim, sem_dim=None):
         super().__init__()
         self.proj = nn.Linear(mel_dim * 2 + text_dim, out_dim)
         self.conv_pos_embed = ConvPositionEmbedding(dim=out_dim)
+
+        # optional semantic vectors on the text positions (see model/semantic.py), added after the projection.
+        # Same as widening proj with zero-init columns: a checkpoint trained without them starts unchanged.
+        self.sem_proj = None
+        if sem_dim:
+            self.sem_norm = nn.LayerNorm(sem_dim)
+            self.sem_proj = nn.Linear(sem_dim, out_dim)
+            nn.init.zeros_(self.sem_proj.weight)
+            nn.init.zeros_(self.sem_proj.bias)
 
     def forward(
         self,
@@ -155,11 +164,19 @@ class InputEmbedding(nn.Module):
         text_embed: float["b n d"],
         drop_audio_cond=False,
         audio_mask: bool["b n"] | None = None,
+        sem: float["b n ds"] | None = None,
+        sem_mask: bool["b n"] | None = None,
+        drop_text=False,
     ):
         if drop_audio_cond:  # cfg for cond audio
             cond = torch.zeros_like(cond)
 
         x = self.proj(torch.cat((x, cond, text_embed), dim=-1))
+        if self.sem_proj is not None and not drop_text:  # cfg for text drops the semantics with it
+            if sem is None:
+                raise ValueError("this model takes semantic vectors (sem) with the text")
+            s = self.sem_proj(self.sem_norm(sem.to(self.sem_norm.weight.dtype)))
+            x = x + s.to(x.dtype) * sem_mask.unsqueeze(-1)
         x = self.conv_pos_embed(x, mask=audio_mask) + x
         return x
 
@@ -189,12 +206,15 @@ class DiT(nn.Module):
         attn_mask_enabled=False,
         long_skip_connection=False,
         checkpoint_activations=False,
+        sem_dim=None,  # width of per-character semantic vectors (e.g. 128 for GTE-ModernColBERT), None to disable
     ):
         super().__init__()
 
         self.time_embed = TimestepEmbedding(dim)
         if text_dim is None:
             text_dim = mel_dim
+        if sem_dim and text_embedding_average_upsampling:
+            raise ValueError("semantic vectors sit on the character positions; average upsampling would move them")
         self.text_embed = TextEmbedding(
             text_num_embeds,
             text_dim,
@@ -202,7 +222,7 @@ class DiT(nn.Module):
             average_upsampling=text_embedding_average_upsampling,
             conv_layers=conv_layers,
         )
-        self.input_embed = InputEmbedding(mel_dim, text_dim, dim)
+        self.input_embed = InputEmbedding(mel_dim, text_dim, dim, sem_dim=sem_dim)
 
         self.rotary_embed = RotaryEmbedding(dim_head)
 
@@ -290,7 +310,19 @@ class DiT(nn.Module):
         drop_text: bool = False,
         cache: bool = True,
         audio_mask: bool["b n"] | None = None,
+        sem: float["b nt ds"] | None = None,
+        sem_mask: bool["b nt"] | None = None,
     ):
+        if sem is not None:
+            # same placement as the character ids in TextEmbedding: position i is frame i, cut or padded to the
+            # audio length, nothing past each sample's own length
+            seq_len = x.shape[1]
+            sem, sem_mask = sem[:, :seq_len], sem_mask[:, :seq_len]
+            sem = F.pad(sem, (0, 0, 0, seq_len - sem.shape[1]))
+            sem_mask = F.pad(sem_mask, (0, seq_len - sem_mask.shape[1]), value=False)
+            if audio_mask is not None:
+                sem_mask = sem_mask & audio_mask
+
         if self.text_uncond is None or self.text_cond is None or not cache:
             if audio_mask is None:
                 seq_len = x.shape[1]
@@ -309,7 +341,16 @@ class DiT(nn.Module):
             else:
                 text_embed = self.text_cond
 
-        x = self.input_embed(x, cond, text_embed, drop_audio_cond=drop_audio_cond, audio_mask=audio_mask)
+        x = self.input_embed(
+            x,
+            cond,
+            text_embed,
+            drop_audio_cond=drop_audio_cond,
+            audio_mask=audio_mask,
+            sem=sem,
+            sem_mask=sem_mask,
+            drop_text=drop_text,
+        )
 
         return x
 
@@ -327,6 +368,8 @@ class DiT(nn.Module):
         drop_text: bool = False,  # cfg for text
         cfg_infer: bool = False,  # cfg inference, pack cond & uncond forward
         cache: bool = False,
+        sem: float["b nt ds"] | None = None,  # semantic vectors on the text positions (model/semantic.py)
+        sem_mask: bool["b nt"] | None = None,
     ):
         batch, seq_len = x.shape[0], x.shape[1]
         if time.ndim == 0:
@@ -334,20 +377,22 @@ class DiT(nn.Module):
 
         # t: conditioning time, text: text, x: noised audio + cond audio + text
         t = self.time_embed(time)
+        sem_kw = dict(sem=sem, sem_mask=sem_mask)
         if cfg_infer:  # pack cond & uncond forward: b n d -> 2b n d
             x_cond = self.get_input_embed(
-                x, cond, text, drop_audio_cond=False, drop_text=False, cache=cache, audio_mask=mask
+                x, cond, text, drop_audio_cond=False, drop_text=False, cache=cache, audio_mask=mask, **sem_kw
             )
             x_uncond = self.get_input_embed(
-                x, cond, text, drop_audio_cond=True, drop_text=True, cache=cache, audio_mask=mask
+                x, cond, text, drop_audio_cond=True, drop_text=True, cache=cache, audio_mask=mask, **sem_kw
             )
             x = torch.cat((x_cond, x_uncond), dim=0)
             t = torch.cat((t, t), dim=0)
             mask = torch.cat((mask, mask), dim=0) if mask is not None else None
         else:
             x = self.get_input_embed(
-                x, cond, text, drop_audio_cond=drop_audio_cond, drop_text=drop_text, cache=cache, audio_mask=mask
-            )
+                x, cond, text, drop_audio_cond=drop_audio_cond, drop_text=drop_text, cache=cache, audio_mask=mask,
+                **sem_kw,
+            )  # fmt: skip
 
         rope = self.rotary_embed.forward_from_seq_len(seq_len)
 

@@ -38,6 +38,7 @@ model = CFM(
     ),
     mel_spec_kwargs=cfg.model.mel_spec,
     vocab_char_map=vocab_char_map,
+    sem_encoder=cfg.model.get("sem_encoder", None),
 ).to(dev)
 ckpt = torch.load(ckpt_path, map_location="cpu", mmap=True, weights_only=True)
 weights = {
