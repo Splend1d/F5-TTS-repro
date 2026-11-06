@@ -38,6 +38,8 @@ TRAIN_RUNS = {
     "main": "f5tts-main-20260930",
     "libritts": "f5tts-libritts-20261007",
     "emilia_small": "f5tts-emilia-small-20261011",
+    "emilia_small_sem": "f5tts-emilia-small-sem-20261021",
+    "emilia_small_bert": "f5tts-emilia-small-bert-20261021",
 }  # training W&B run ids
 
 

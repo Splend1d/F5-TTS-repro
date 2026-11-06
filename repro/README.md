@@ -156,6 +156,39 @@ python repro/summarize.py results/F5TTS_v1_Base_50000
 
 `repro/ckpts_eval/` (not committed) holds the WavLM-large SIM model (`wavlm_large_finetune.pth`).
 
+## Semantic conditioning (F5-TTS-sem)
+
+This clone (`speechgen/F5-TTS-sem`, branch `sem`) adds frozen ColBERT token vectors to the text input. The original
+`F5-TTS` tree and its runs are untouched.
+
+- **What goes in.** PyLate's document encoding of the transcript (`encode(..., is_query=False, output_value=None)`,
+  GTE-ModernColBERT, 128-d). Each kept token's vector is copied onto the F5 positions of the characters it covers;
+  skiplist punctuation, `[CLS]`, `[D]` and `[SEP]` are not placed (`src/f5_tts/model/semantic.py`).
+- **Where.** `InputEmbedding`: `proj(cat(x, cond, text)) + sem_proj(LayerNorm(sem))`, with `sem_proj` zero-initialized,
+  so a checkpoint trained without it starts unchanged. Dropping the text for classifier-free guidance drops the
+  semantics too.
+- **Config.** `model.sem_encoder` and `model.arch.sem_dim` turn it on. `ckpts.init_checkpoint` starts an empty run from
+  another run's checkpoint (new parameters keep their init, fresh optimizer, the update count continues).
+  `optim.rewarm_updates` warms the LR up again onto the same schedule, and `optim.end_update` stops early without
+  changing the schedule.
+- **Run `emilia_small_sem`.** `F5TTS_v1_Small_Emilia_EN_sem`: emilia_small's `model_150000.pt` trained on the same data
+  order and LR schedule, compared against emilia_small at the same updates (a first comparison stopped at 200000;
+  the run continues with no early stop). Settings are in `repro/state/emilia_small_sem.env`;
+  `results/emilia_small[_online]` link to the anchor's results.
+- **Run `emilia_small_bert`** (control). `F5TTS_v1_Small_Emilia_EN_bert`: the same with `hf:answerdotai/ModernBERT-base`,
+  the MLM-only model GTE-ModernColBERT was built from (last hidden layer, 768-d, same text, skiplist and
+  placement), so the difference between the two runs is the retrieval training.
+
+```bash
+source repro/env.sh   # this clone's venv: PyLate 1.6.0, sentence-transformers 5.3.0, transformers 5.3.0
+TAG=emilia_small_sem PART=general QOS=normal TLIMIT=2-00:00:00 VARIANTS=8 SAVES_PER_SESSION=0 CPG=5 MPG=50 \
+  bash repro/submit_train.sh
+python repro/report.py --all
+```
+
+The venv is `repro/requirements.sem.lock.txt`: the main tree's packages plus PyLate and its pinned
+sentence-transformers and transformers.
+
 ## Progress page
 
 `docs/` is served by GitHub Pages. `repro/progress/update.sh` runs `export.py`, which writes `docs/metrics.json`

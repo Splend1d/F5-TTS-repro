@@ -20,6 +20,8 @@ RESULTS = Path(__file__).resolve().parent.parent / "results"
 RUNS = [  # (label, description)
     ("main", "Emilia Base (F5TTS_v1_Base)"),
     ("emilia_small", "Emilia Small (F5TTS_v1_Small)"),
+    ("emilia_small_sem", "Emilia Small + ColBERT sem (from emilia_small 150k)"),
+    ("emilia_small_bert", "Emilia Small + ModernBERT (control, from emilia_small 150k)"),
     ("libritts", "LibriTTS Small (F5TTS_v1_Small)"),
 ]
 

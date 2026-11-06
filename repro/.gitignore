@@ -1,6 +1,8 @@
 logs/
 state/*
 !state/main.env
+!state/emilia_small_sem.env
+!state/emilia_small_bert.env
 stale/
 ckpts_eval
 __pycache__/
