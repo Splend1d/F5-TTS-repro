@@ -212,6 +212,33 @@ python repro/prosody_corr.py --out results/_analysis/prosody --compare bert250k:
 python repro/prosody_micro.py --prosody-dir results/_analysis/prosody small250k bert250k --compare bert250k:small250k
 ```
 
+## MSP-IMPROV emotional test sets
+
+Two emotional zero-shot TTS sets from MSP-IMPROV in the Seed-TTS `meta.lst` layout, so the Seed-TTS pipeline
+generates and scores them (`--metalst`). Each target is a real recording, and its prompt is the same speaker in the
+same emotion saying something else. Only clips whose listener consensus equals the scene's emotion are used.
+
+- `fixed`: the 20 fixed target sentences, read (R) or said inside the scene (T). Every sentence occurs in all four
+  emotions, so the words do not give the emotion away.
+- `improv`: lines the actors improvised inside the scenes (S), transcribed with Whisper large-v3. Prompts are the
+  speaker's read sentences.
+
+The corpus is licensed and not in this repo. `repro/build_msp_emo.py` reads it from `DB` and writes clips,
+transcripts, word-aligned cuts and the sets to `data/msp_improv_emo/` (ignored); its docstring has the rules.
+
+```bash
+sbatch repro/msp_emo_build.sbatch                       # Whisper, MMS_FA cuts, prompt pairs
+sbatch repro/msp_emo_eval.sbatch ground_truth - -       # the real targets, scored the same way (ceilings)
+sbatch repro/msp_emo_eval.sbatch bert250k F5TTS_v1_Small_Emilia_EN_bert \
+  ckpts/F5TTS_v1_Small_vocos_pinyin_Emilia_EN_bert/model_250000.pt   # one per system: WER/SIM/UTMOS
+sbatch repro/msp_emo_analysis.sbatch                   # all systems: prosody + emotion metrics, summary.md
+```
+
+`repro/msp_emo_eval.py` adds emotion2vec+ accuracy over the four classes, emotion-embedding similarity to the target
+and the prompt, and on the fixed set an emotion-specific margin: the output's prosody correlation with the
+target-emotion recording minus its mean correlation with the same speaker's other-emotion recordings of that
+sentence. Results go to `results/_analysis/msp_emo/<set>/summary.md`.
+
 ## Progress page
 
 `docs/` is served by GitHub Pages. `repro/progress/update.sh` runs `export.py`, which writes `docs/metrics.json`
