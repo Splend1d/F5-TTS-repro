@@ -6,3 +6,4 @@ state/*
 stale/
 ckpts_eval
 __pycache__/
+demo/

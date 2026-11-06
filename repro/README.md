@@ -239,6 +239,12 @@ and the prompt, and on the fixed set an emotion-specific margin: the output's pr
 target-emotion recording minus its mean correlation with the same speaker's other-emotion recordings of that
 sentence. Results go to `results/_analysis/msp_emo/<set>/summary.md`.
 
+Listening page: https://splend1d.github.io/F5-TTS-repro/msp_improv/. It has 8 fixed-text groups of one sentence in
+four emotions and 24 improvised lines, each with the prompt, the real recording and every system, labelled by
+emotion2vec+. The rows are drawn at random (seed 0) under coverage rules, not picked by quality.
+`python repro/make_msp_demo.py` builds it into `repro/demo/msp_improv/` (ignored; it opens from disk too). The
+published copy is `docs/msp_improv/` on `main`, which GitHub Pages serves.
+
 ## Progress page
 
 `docs/` is served by GitHub Pages. `repro/progress/update.sh` runs `export.py`, which writes `docs/metrics.json`
