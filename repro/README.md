@@ -179,15 +179,91 @@ This clone (`speechgen/F5-TTS-sem`, branch `sem`) adds frozen ColBERT token vect
   the MLM-only model GTE-ModernColBERT was built from (last hidden layer, 768-d, same text, skiplist and
   placement), so the difference between the two runs is the retrieval training.
 
+The venv is `repro/requirements.sem.lock.txt`: the main tree's packages plus PyLate and its pinned
+sentence-transformers and transformers. Install it as in [Environment (uv)](#environment-uv), with this lock file.
+
+### Training the variants: no sem, +ColBERT, +ModernBERT
+
+All three use the same data (`data/Emilia_EN_pinyin`, see [Training data](#training-data)), batch (307,200 frames
+per update), LR schedule and seed. They differ only in the text input and where they start:
+
+| Variant | TAG | Config | Text input | Starts from |
+|---|---|---|---|---|
+| no sem (baseline) | `emilia_small` | `F5TTS_v1_Small_Emilia_EN` | characters | scratch |
+| +ColBERT | `emilia_small_sem` | `F5TTS_v1_Small_Emilia_EN_sem` | + GTE-ModernColBERT, 128-d | baseline's `model_150000.pt` |
+| +ModernBERT | `emilia_small_bert` | `F5TTS_v1_Small_Emilia_EN_bert` | + ModernBERT-base, 768-d | baseline's `model_150000.pt` |
+
+A config without `model.sem_encoder` and `model.arch.sem_dim` is the no-sem model, upstream's DiT unchanged. The two
+sem configs add those keys, plus `ckpts.init_checkpoint` (the baseline's 150k checkpoint), `optim.rewarm_updates:
+2000`, and their own `save_dir` and W&B name. Runs are compared at equal updates (200k, 250k, 300k), so the
+baseline keeps training past 150k on its own schedule.
+
+**1. Baseline (no sem), from scratch.** It was trained in the main `F5-TTS` tree as TAG `emilia_small`, and this
+clone's `results/emilia_small[_online]` link to that run's results. To train one here, use a new TAG and W&B id.
+Otherwise its evals and W&B logs land in the existing run.
+
 ```bash
-source repro/env.sh   # this clone's venv: PyLate 1.6.0, sentence-transformers 5.3.0, transformers 5.3.0
-TAG=emilia_small_sem PART=general QOS=normal TLIMIT=2-00:00:00 VARIANTS=8 SAVES_PER_SESSION=0 CPG=5 MPG=50 \
-  bash repro/submit_train.sh
-python repro/report.py --all
+source repro/env.sh
+cat > repro/state/small_nosem.env <<EOF
+export CFG=F5TTS_v1_Small_Emilia_EN
+export F5_LOGGER=wandb WANDB_MODE=online WANDB_PROJECT=CFM-TTS WANDB_RESUME=allow
+export WANDB_NAME=f5-train-small-nosem WANDB_RUN_ID=f5tts-small-nosem-$(date +%Y%m%d)
+export EXTRA="++ckpts.save_per_updates=10000"   # a named checkpoint every 10k, as in the sem configs
+export F5_ON_CHECKPOINT="bash $PWD/repro/on_checkpoint.sh small_nosem F5TTS_v1_Small_Emilia_EN"
+EOF
+TAG=small_nosem SPREAD=1 GTYPE=L40S VARIANTS=4 bash repro/submit_train.sh   # preempt, 4 x L40S, short sessions
 ```
 
-The venv is `repro/requirements.sem.lock.txt`: the main tree's packages plus PyLate and its pinned
-sentence-transformers and transformers.
+Checkpoints go to `ckpts/F5TTS_v1_Small_vocos_pinyin_Emilia_EN/`.
+
+**2. +ColBERT and +ModernBERT, from the baseline's update 150000.** Their settings are tracked in
+`repro/state/emilia_small_{sem,bert}.env`. Both configs point `ckpts.init_checkpoint` at the main tree's
+`ckpts/F5TTS_v1_Small_vocos_pinyin_Emilia_EN/model_150000.pt`. For another baseline, add
+`export EXTRA="++ckpts.init_checkpoint=/path/to/model_150000.pt"` to the run's env file.
+
+`init_checkpoint` applies only when the run's `save_dir` holds no checkpoint yet. After the first save, sessions
+resume from the run's own `model_last.pt`, and the re-warmup survives the resume.
+
+```bash
+source repro/env.sh
+# +ColBERT: one long job on general, 8 GPUs on one node
+TAG=emilia_small_sem PART=general QOS=normal TLIMIT=2-00:00:00 VARIANTS=8 SAVES_PER_SESSION=0 CPG=5 MPG=50 \
+  bash repro/submit_train.sh
+# +ModernBERT: 4 x L40S on one node, srun launch (NCCL settings in its env file)
+TAG=emilia_small_bert PART=general QOS=normal TLIMIT=2-00:00:00 VARIANTS=4 SAVES_PER_SESSION=0 SPREAD=node \
+  GTYPE=L40S bash repro/submit_train.sh
+```
+
+**Without SLURM**, on one 8-GPU node (NGPU × accum = 16, as the launcher sets it):
+
+```bash
+source repro/env.sh
+B="++datasets.batch_size_per_gpu=19200 ++datasets.max_samples=32 ++optim.grad_accumulation_steps=2 ++ckpts.save_per_updates=10000"
+INIT=$PWD/ckpts/F5TTS_v1_Small_vocos_pinyin_Emilia_EN/model_150000.pt
+accelerate launch --mixed_precision bf16 src/f5_tts/train/train.py --config-name F5TTS_v1_Small_Emilia_EN.yaml $B
+accelerate launch --mixed_precision bf16 src/f5_tts/train/train.py --config-name F5TTS_v1_Small_Emilia_EN_sem.yaml $B \
+  ++ckpts.init_checkpoint=$INIT
+accelerate launch --mixed_precision bf16 src/f5_tts/train/train.py --config-name F5TTS_v1_Small_Emilia_EN_bert.yaml $B \
+  ++ckpts.init_checkpoint=$INIT
+```
+
+**Other variants:**
+- **Sem from scratch:** `++ckpts.init_checkpoint=null` trains everything from update 0. This has not been run here.
+- **Another encoder:** set `model.sem_encoder` to a PyLate ColBERT model, or to `hf:<model>` for a transformers
+  encoder's last hidden layer, and set `model.arch.sem_dim` to its vector width. `init_checkpoint` must come from a
+  no-sem run of the same architecture: the trainer refuses a checkpoint if anything other than the new `.sem_`
+  parameters is missing.
+- **Stop at a fixed update** without changing the LR schedule: `++optim.end_update=<N>`.
+
+**3. Evaluate and compare.** `F5_ON_CHECKPOINT` in each env file queues evals of every named checkpoint:
+- a held-out loss every 10k updates;
+- a full Seed-TTS test-en eval (WER/SIM/UTMOS) every 50k, for both EMA and online weights.
+
+To evaluate one checkpoint by hand:
+`sbatch repro/eval_ckpt.sbatch <label> <CFG> <ckpt> <update> full ema`.
+
+`python repro/report.py --all` prints one table of all runs. A new TAG needs a row in its `RUNS` list. For prosody
+and emotion, see the next two sections.
 
 ## Word-level prosody correlation
 
